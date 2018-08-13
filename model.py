@@ -5,49 +5,21 @@ from keras.regularizers import *
 from keras.initializers import *
 
 
-def build_word_embeddings(vocabulary_size, word_embedding_size, regularization_lambda, use_pretrained_embeddings=False,
-                          pretrained_embeddings=None, retrain_embeddings=True, word_index=None, mask_zero=True):
-    # Word embeddings lookup for words in sequence
-    if use_pretrained_embeddings:
-        embedding_matrix = np.zeros((len(word_index) + 1, word_embedding_size))
-        for word, i in word_index.items():
-            embedding_vector = pretrained_embeddings.get(word)
-            if embedding_vector is not None:
-                # words not found in embedding index will be all-zeros.
-                embedding_matrix[i] = embedding_vector
-
-        word_embeddings = Embedding(input_dim=vocabulary_size + 1,
-                                    output_dim=word_embedding_size,
-                                    embeddings_initializer=Constant(embedding_matrix),
-                                    embeddings_regularizer=l2(regularization_lambda),
-                                    mask_zero=mask_zero,
-                                    name="sequence_word_embeddings",
-                                    trainable=retrain_embeddings)
-
-    else:
-        word_embeddings = Embedding(input_dim=vocabulary_size + 1,
-                                    output_dim=word_embedding_size,
-                                    embeddings_initializer='glorot_uniform',
-                                    embeddings_regularizer=l2(regularization_lambda),
-                                    mask_zero=mask_zero,
-                                    name="sequence_word_embeddings",
-                                    trainable=retrain_embeddings)
-    return word_embeddings
-
-
-def build_structured_self_attention_embedder(word_window_size, vocabulary_size, word_embedding_size, hidden_state_size,
-                                             num_layers, attention_filters1, attention_filters2, dropout,
-                                             recurrent_dropout, entity_embedding_size, regularization_lambda,
-                                             use_pretrained_embeddings=False, pretrained_embeddings=None,
-                                             retrain_embeddings=True, word_index=None):
+def build_structured_self_attention_embedder(word_window_size, vocabulary_size, word_embedding_size,
+                                             hidden_state_size, num_layers, attention_filters1, attention_filters2,
+                                             dropout, recurrent_dropout, regularization_lambda):
     # Input for text sequence
-    sequence_input = Input(shape=(word_window_size,),
-                           name="sequence_input_placeholder")
-    # Word embeddings lookup for words in sequence
-    sequence_word_embeddings = build_word_embeddings(vocabulary_size, word_embedding_size, regularization_lambda,
-                                                     use_pretrained_embeddings, pretrained_embeddings,
-                                                     retrain_embeddings, word_index, mask_zero=False)(sequence_input)
+    sequence_input = Input(shape=(word_window_size,), name="sequence_input_placeholder")
 
+    # Word embeddings lookup for words in sequence
+    sequence_word_embeddings = Embedding(input_dim=vocabulary_size + 1,
+                                         output_dim=word_embedding_size,
+                                         embeddings_initializer='glorot_uniform',
+                                         embeddings_regularizer=l2(regularization_lambda),
+                                         mask_zero=True,
+                                         name="sequence_word_embeddings")(sequence_input)
+
+    # Obtain hidden state of Bidirectional LSTM at each word embedding
     hidden_states = sequence_word_embeddings
     for layer in range(num_layers):
         hidden_states = Bidirectional(LSTM(units=hidden_state_size,
@@ -66,6 +38,7 @@ def build_structured_self_attention_embedder(word_window_size, vocabulary_size, 
                                            unroll=True),
                                       merge_mode='concat', name="lstm_outputs_{}".format(layer))(hidden_states)
 
+    # Attention mechanism
     attention = Conv1D(filters=attention_filters1, kernel_size=1, activation='tanh', padding='same', use_bias=True,
                        kernel_initializer='glorot_uniform', bias_initializer='zeros',
                        kernel_regularizer=l2(regularization_lambda),
@@ -78,9 +51,11 @@ def build_structured_self_attention_embedder(word_window_size, vocabulary_size, 
                        name="attention_layer2")(attention)
     attention = Lambda(lambda x: softmax(x, axis=1), name="attention_vector")(attention)
 
+    # Apply attention weights
     weighted_sequence_embedding = Dot(axes=[1, 1], normalize=False, name="weighted_sequence_embedding")(
         [attention, hidden_states])
 
+    # Add and normalize to obtain final sequence embedding
     sequence_embedding = Lambda(lambda x: K.l2_normalize(K.sum(x, axis=1)))(weighted_sequence_embedding)
 
     # Build model
